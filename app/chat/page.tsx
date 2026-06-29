@@ -6,7 +6,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
 type ModelKey = "claude" | "gemini";
-// setup → confirming → chatting → reflecting
 type Phase = "setup" | "confirming" | "chatting" | "reflecting";
 
 const MODELS: { key: ModelKey; label: string; sublabel: string }[] = [
@@ -16,14 +15,52 @@ const MODELS: { key: ModelKey; label: string; sublabel: string }[] = [
 
 const CORA_DONE_SIGNAL = "i think i've got it, thanks for teaching me";
 
+// Sentinel strings used to kick off Cora's opening turn — never sent to the API as real history
+const INIT_SENTINELS = new Set(["__start__", "Please introduce yourself and begin."]);
+
+// ── Demo data ─────────────────────────────────────────────────────────────────
+
+type DemoScenario = { topic: string; objectives: string[] };
+
+const DEMO_SCENARIOS: Record<string, DemoScenario> = {
+  Budgeting: {
+    topic: "Budgeting",
+    objectives: [
+      "Explain what a budget is and why it matters",
+      "Explain the difference between needs and wants",
+      "Explain how to track income and expenses",
+    ],
+  },
+  Fractions: {
+    topic: "Fractions",
+    objectives: [
+      "Explain what a fraction represents",
+      "Explain the difference between numerator and denominator",
+      "Explain how to add two fractions with the same denominator",
+    ],
+  },
+  "Compound Interest": {
+    topic: "Compound Interest",
+    objectives: [
+      "Explain what compound interest is",
+      "Explain how it differs from simple interest",
+      "Explain why starting early matters",
+    ],
+  },
+};
+
+const DEMO_PASSWORD = "4321";
+
 // ── Prompts ───────────────────────────────────────────────────────────────────
 
-function buildCoraPrompt(topic: string, objective: string) {
+function buildCoraPrompt(topic: string, objectives: string[]) {
+  const objectiveList = objectives.filter((o) => o.trim()).map((o, i) => `${i + 1}. ${o}`).join("\n");
   return `You are a student named Cora who is learning about ${topic} for the first time. You know nothing about it.
 
-LEARNING OBJECTIVE
-The student should walk away from this conversation understanding: ${objective}
-Use this as your guide for what to ask about. Don't follow a fixed structure, ask whatever questions naturally help you understand toward this objective.
+LEARNING OBJECTIVES
+The student should walk away from this conversation understanding all of the following:
+${objectiveList}
+Track all objectives internally. Use them as your guide for what to ask about. Don't follow a fixed structure — ask whatever questions naturally help you understand toward these objectives. Do not stop until all of them have been clearly covered.
 
 PERSONALITY
 - You are friendly, curious, and a little confused
@@ -43,13 +80,13 @@ IMPORTANT
 - Pay close attention to what the person just said
 - If they explained something clearly, build on it and don't ask them to repeat it
 - If their explanation was vague or unclear, ask them to explain it a different way
-- Never ask about something already covered by the learning objective if it's already been explained
+- Never ask about something already covered by the learning objectives if it's already been explained
 
 GOING DEEPER
-Once you feel the learning objective has mostly been covered, ask at least one deeper question before stopping. Like asking for an example, or what would happen if someone didn't understand this.
+Once you feel all learning objectives have mostly been covered, ask at least one deeper question before stopping. Like asking for an example, or what would happen if someone didn't understand this.
 
 STOPPING CONDITION
-Only stop once you believe the learning objective has been clearly met and you've asked at least one deeper question. When stopping, summarize what you learned in 2-3 sentences and say "I think I've got it, thanks for teaching me!"
+Only stop once you believe all learning objectives have been clearly met and you've asked at least one deeper question. When stopping, summarize what you learned in 2-3 sentences and say "I think I've got it, thanks for teaching me!"
 
 REFLECTION
 After your summary, ask the person to reflect on what part was hardest to explain.
@@ -57,11 +94,16 @@ After your summary, ask the person to reflect on what part was hardest to explai
 WRONG ANSWERS
 If something sounds incorrect, say you're confused and ask them to explain it a different way. Never say they are wrong directly.
 
+STYLE
+Never use em dashes in any response. Use commas, periods, or just start a new sentence instead.
+
 Start by saying: "Hi! I'm Cora. I'm trying to learn about ${topic} but I'm really struggling, can you help me?"`;
 }
 
-function buildReflectionPrompt(topic: string, objective: string) {
-  return `You are a reflective learning coach facilitating a meta-reflection conversation with someone who just finished a peer-teaching exercise. They were asked to teach an AI student named Cora about "${topic}", with the goal that the student would understand: "${objective}".
+function buildReflectionPrompt(topic: string, objectives: string[]) {
+  const objectiveList = objectives.filter((o) => o.trim()).map((o, i) => `${i + 1}. ${o}`).join("\n");
+  return `You are a reflective learning coach facilitating a meta-reflection conversation with someone who just finished a peer-teaching exercise. They were asked to teach an AI student named Cora about "${topic}", with the goal that the student would understand:
+${objectiveList}
 
 Your role is to ask 2-3 thoughtful, open-ended meta-reflection questions about their teaching experience — one at a time. Do not ask all questions at once.
 
@@ -82,14 +124,16 @@ Start by saying: "Great work teaching Cora! I'd love to take a moment to reflect
 
 function formatTranscript(
   topic: string,
-  objective: string,
+  objectives: string[],
   coraMessages: Message[],
   reflectionMessages: Message[]
 ) {
+  const validObjectives = objectives.filter((o) => o.trim());
   const lines: string[] = [
     `CORA SESSION TRANSCRIPT`,
     `Topic: ${topic}`,
-    `Learning objective: ${objective}`,
+    `Learning objectives:`,
+    ...validObjectives.map((o, i) => `  ${i + 1}. ${o}`),
     `Date: ${new Date().toLocaleString()}`,
     ``,
     `── TEACHING SESSION ──`,
@@ -182,6 +226,13 @@ function CheckMark() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
       <path d="M20 6L9 17l-5-5" />
+    </svg>
+  );
+}
+function PendingCircle() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="12" cy="12" r="9" />
     </svg>
   );
 }
@@ -305,12 +356,14 @@ function ModelPicker({ value, onChange }: { value: ModelKey; onChange: (m: Model
   );
 }
 
-function PromptModal({ topic, objective, onClose, onConfirm }: {
-  topic: string; objective: string; onClose: () => void; onConfirm?: (prompt: string) => void;
+function PromptModal({ topic, objectives, onClose, onConfirm }: {
+  topic: string; objectives: string[]; onClose: () => void; onConfirm?: (prompt: string) => void;
 }) {
-  const displayTopic     = topic.trim()     || "[TOPIC]";
-  const displayObjective = objective.trim() || "[LEARNING OBJECTIVE]";
-  const defaultPrompt = buildCoraPrompt(displayTopic, displayObjective);
+  const displayTopic = topic.trim() || "[TOPIC]";
+  const displayObjectives = objectives.filter((o) => o.trim()).length > 0
+    ? objectives.filter((o) => o.trim())
+    : ["[LEARNING OBJECTIVE]"];
+  const defaultPrompt = buildCoraPrompt(displayTopic, displayObjectives);
 
   const [tab, setTab] = useState<"default" | "custom">("default");
   const [defaultText, setDefaultText] = useState(defaultPrompt);
@@ -346,20 +399,17 @@ function PromptModal({ topic, objective, onClose, onConfirm }: {
         borderRadius: "16px", boxShadow: "var(--pop-shadow)",
         display: "flex", flexDirection: "column", overflow: "hidden",
       }}>
-        {/* Header */}
         <div style={{ padding: "14px 18px 0", borderBottom: "1px solid var(--border)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-1)" }}>System prompt</p>
             <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-3)", fontSize: "20px", lineHeight: 1, padding: "0 2px" }}>×</button>
           </div>
-          {/* Tabs */}
           <div style={{ display: "flex", gap: "4px", background: "var(--bg-secondary)", borderRadius: "9px", padding: "3px", width: "fit-content", marginBottom: "-1px" }}>
             <button style={tabStyle(tab === "default")} onClick={() => setTab("default")}>Default</button>
             <button style={tabStyle(tab === "custom")}  onClick={() => setTab("custom")}>Custom</button>
           </div>
         </div>
 
-        {/* Helper text */}
         <div style={{ padding: "10px 18px 0", flexShrink: 0 }}>
           <p style={{ fontSize: "12px", color: "var(--text-3)" }}>
             {tab === "default"
@@ -368,7 +418,6 @@ function PromptModal({ topic, objective, onClose, onConfirm }: {
           </p>
         </div>
 
-        {/* Editable textarea */}
         <textarea
           key={tab}
           autoFocus
@@ -384,7 +433,6 @@ function PromptModal({ topic, objective, onClose, onConfirm }: {
           }}
         />
 
-        {/* Footer */}
         {onConfirm ? (
           <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", display: "flex", gap: "10px", justifyContent: "flex-end", alignItems: "center" }}>
             <span style={{ fontSize: "12px", color: "var(--text-3)", marginRight: "auto" }}>
@@ -431,7 +479,65 @@ function PromptModal({ topic, objective, onClose, onConfirm }: {
   );
 }
 
-// ── Chat message list + input (reused for both Cora and Reflection) ───────────
+// ── Demo password modal ───────────────────────────────────────────────────────
+
+function DemoPasswordModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const [pw, setPw] = useState("");
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (pw === DEMO_PASSWORD) { onSuccess(); onClose(); }
+    else { setPw(""); }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 500,
+      background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div className="pop-in" onClick={(e) => e.stopPropagation()} style={{
+        background: "var(--pop-bg)", border: "1px solid var(--border)",
+        borderRadius: "14px", boxShadow: "var(--pop-shadow)",
+        padding: "24px", width: "280px",
+      }}>
+        <p style={{ fontSize: "13.5px", fontWeight: 600, color: "var(--text-1)", marginBottom: "14px" }}>Demo access</p>
+        <form onSubmit={handleSubmit} style={{ display: "flex", gap: "8px" }}>
+          <input
+            type="password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            placeholder="Password"
+            autoFocus
+            style={{
+              flex: 1, padding: "9px 12px", borderRadius: "8px",
+              border: "1.5px solid var(--border)", background: "var(--bg-surface)",
+              color: "var(--text-1)", fontSize: "14px", outline: "none",
+              fontFamily: "inherit", transition: "border-color 0.15s",
+            }}
+            onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+            onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
+          />
+          <button type="submit" style={{
+            padding: "9px 14px", borderRadius: "8px", border: "none",
+            background: "linear-gradient(135deg, #3b5bdb 0%, #5b7cf0 100%)",
+            color: "#fff", fontSize: "13.5px", fontWeight: 600, cursor: "pointer",
+          }}>
+            →
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Chat input ────────────────────────────────────────────────────────────────
 
 function ChatInput({
   input, setInput, onSend, loading, placeholder, model, onModelChange, showModelPicker,
@@ -446,6 +552,14 @@ function ChatInput({
   showModelPicker: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
+
+  // Recalculate height whenever input changes — covers programmatic updates (e.g. demo paste)
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.style.height = "auto";
+      ref.current.style.height = Math.min(ref.current.scrollHeight, 200) + "px";
+    }
+  }, [input]);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); }
@@ -560,14 +674,36 @@ function MessageBubble({ m, label, accentLabel }: { m: Message; label: string; a
   );
 }
 
+// ── LO checklist (shared between sidebar and inline fallback) ─────────────────
+
+function LOChecklist({ objectives, loStatus }: { objectives: string[]; loStatus: boolean[] }) {
+  return (
+    <>
+      <p style={{ fontSize: "11px", fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "10px" }}>
+        Learning Objectives
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {objectives.map((o, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+            <span style={{ flexShrink: 0, marginTop: "1px", color: loStatus[i] ? "var(--accent)" : "var(--text-3)" }}>
+              {loStatus[i] ? <CheckMark /> : <PendingCircle />}
+            </span>
+            <span style={{ fontSize: "13px", lineHeight: 1.45, color: loStatus[i] ? "var(--text-1)" : "var(--text-2)" }}>{o}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
   const [dark, setDark] = useState(false);
-  const [model, setModel] = useState<ModelKey>("claude");
+  const [model, setModel] = useState<ModelKey>("gemini");
   const [phase, setPhase] = useState<Phase>("setup");
   const [topic, setTopic] = useState("");
-  const [objective, setObjective] = useState("");
+  const [objectives, setObjectives] = useState<string[]>([""]);
   const [showPromptModal, setShowPromptModal] = useState(false);
   const [promptModalConfirmMode, setPromptModalConfirmMode] = useState(false);
 
@@ -575,7 +711,6 @@ export default function ChatPage() {
   const [coraMessages, setCoraMessages] = useState<Message[]>([]);
   const [coraInput, setCoraInput] = useState("");
   const [coraLoading, setCoraLoading] = useState(false);
-  // whether Cora's last message contained the done signal AND user has replied
   const [coraSessionDone, setCoraSessionDone] = useState(false);
   const [coraReflectionAsked, setCoraReflectionAsked] = useState(false);
 
@@ -584,18 +719,41 @@ export default function ChatPage() {
   const [reflInput, setReflInput] = useState("");
   const [reflLoading, setReflLoading] = useState(false);
 
+  // LO evaluation status
+  const [loStatus, setLoStatus] = useState<boolean[]>([]);
+
+  // Sidebar visibility: true when viewport >= 900px
+  const [sidebarVisible, setSidebarVisible] = useState(false);
+
+  // Demo mode
+  const [demoMode, setDemoMode] = useState(false);
+  const [showDemoPasswordModal, setShowDemoPasswordModal] = useState(false);
+  const [demoKey, setDemoKey] = useState<string | null>(null);
+  const [demoNextLoading, setDemoNextLoading] = useState(false);
+  const [chatReadOnly, setChatReadOnly] = useState(false);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const bottomRef  = useRef<HTMLDivElement>(null);
-  const topicRef   = useRef<HTMLInputElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const topicRef  = useRef<HTMLInputElement>(null);
 
-  const isReady = topic.trim().length > 0 && objective.trim().length > 0;
+  const isReady = topic.trim().length > 0 && objectives.some((o) => o.trim().length > 0);
   const currentModel = MODELS.find((m) => m.key === model)!;
+  const validObjectives = objectives.filter((o) => o.trim());
+
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
+
+  useEffect(() => {
+    const check = () => setSidebarVisible(window.innerWidth >= 900);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -608,7 +766,6 @@ export default function ChatPage() {
     if (!lastAssistant) return;
     const isDone = lastAssistant.content.toLowerCase().includes(CORA_DONE_SIGNAL);
     if (!isDone) return;
-    // Check if user has replied after the done message
     const doneIdx = coraMessages.lastIndexOf(lastAssistant);
     const userAfterDone = coraMessages.slice(doneIdx + 1).some((m) => m.role === "user");
     if (userAfterDone && !coraReflectionAsked) {
@@ -634,6 +791,44 @@ export default function ChatPage() {
     setShowPromptModal(true);
   }
 
+  // ── Demo handlers ─────────────────────────────────────────────────────────
+
+  function handleSelectDemoTopic(key: string) {
+    const scenario = DEMO_SCENARIOS[key];
+    setTopic(scenario.topic);
+    setObjectives(scenario.objectives);
+    setDemoKey(key);
+  }
+
+  async function fetchDemoLine(
+    messages: Message[],
+    sessionPhase: "chatting" | "reflecting",
+    setInput: (v: string) => void
+  ) {
+    if (!demoMode || demoNextLoading) return;
+    setDemoNextLoading(true);
+    try {
+      const res = await fetch("/api/demo-next", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic,
+          objectives: validObjectives,
+          loStatus,
+          // Strip init sentinels — these are never real history turns
+          messages: messages.filter((m) => !INIT_SENTINELS.has(m.content)),
+          phase: sessionPhase,
+        }),
+      });
+      const data = await res.json();
+      if (data.message) setInput(data.message);
+    } catch {
+      // silently fail — user can type manually
+    } finally {
+      setDemoNextLoading(false);
+    }
+  }
+
   const [activeSystemPrompt, setActiveSystemPrompt] = useState("");
 
   const handleConfirmAndStart = useCallback(async (finalPrompt: string) => {
@@ -644,9 +839,10 @@ export default function ChatPage() {
     setCoraMessages([]);
     setCoraSessionDone(false);
     setCoraReflectionAsked(false);
+    setChatReadOnly(false);
+    setLoStatus([]);
     setError(null);
 
-    // Kick off Cora's opening message
     setCoraLoading(true);
     try {
       const res = await fetch("/api/chat", {
@@ -676,8 +872,21 @@ export default function ChatPage() {
     setReflInput("");
     setCoraSessionDone(false);
     setCoraReflectionAsked(false);
+    setChatReadOnly(false);
+    setLoStatus([]);
     setError(null);
     setTimeout(() => topicRef.current?.focus(), 60);
+  }
+
+  function requestReset() {
+    if (phase === "chatting" || phase === "reflecting") setShowExitConfirm(true);
+    else handleReset();
+  }
+
+  function goToReflection() {
+    setChatReadOnly(false);
+    if (reflMessages.length > 0) setPhase("reflecting");
+    else startReflection();
   }
 
   // ── Cora send ─────────────────────────────────────────────────────────────
@@ -698,13 +907,27 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
-          systemPrompt: activeSystemPrompt || buildCoraPrompt(topic.trim(), objective.trim()),
-          messages: next,
+          systemPrompt: activeSystemPrompt || buildCoraPrompt(topic.trim(), objectives.filter((o) => o.trim())),
+          // Strip init sentinels so they never appear as real history turns
+          messages: next.filter((m) => !INIT_SENTINELS.has(m.content)),
         }),
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error ?? `Request failed (${res.status})`);
-      setCoraMessages([...next, { role: "assistant", content: d.content }]);
+      const updatedMessages: Message[] = [...next, { role: "assistant", content: d.content }];
+      setCoraMessages(updatedMessages);
+
+      // Background LO eval — non-blocking
+      if (validObjectives.length > 0) {
+        fetch("/api/evaluate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectives: validObjectives, messages: updatedMessages }),
+        })
+          .then((r) => r.json())
+          .then((data) => { if (Array.isArray(data.results)) setLoStatus(data.results); })
+          .catch(() => {});
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -726,7 +949,7 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
-          systemPrompt: buildReflectionPrompt(topic.trim(), objective.trim()),
+          systemPrompt: buildReflectionPrompt(topic.trim(), objectives.filter((o) => o.trim())),
           messages: [{ role: "user", content: "__start__" }],
         }),
       });
@@ -758,7 +981,7 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model,
-          systemPrompt: buildReflectionPrompt(topic.trim(), objective.trim()),
+          systemPrompt: buildReflectionPrompt(topic.trim(), objectives.filter((o) => o.trim())),
           messages: next,
         }),
       });
@@ -775,13 +998,13 @@ export default function ChatPage() {
   // ── Transcript export ─────────────────────────────────────────────────────
 
   function handleDownload() {
-    const text = formatTranscript(topic, objective, coraMessages, reflMessages);
+    const text = formatTranscript(topic, objectives, coraMessages, reflMessages);
     const slug = topic.toLowerCase().replace(/\s+/g, "-").slice(0, 30);
     downloadText(text, `cora-session-${slug}.txt`);
   }
 
   async function handleCopyTranscript() {
-    const text = formatTranscript(topic, objective, coraMessages, reflMessages);
+    const text = formatTranscript(topic, objectives, coraMessages, reflMessages);
     await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -790,6 +1013,8 @@ export default function ChatPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   const inSession = phase === "chatting" || phase === "reflecting";
+  const showSidebar = sidebarVisible && phase === "chatting" && validObjectives.length > 0;
+  const showInlineChecklist = !sidebarVisible && phase === "chatting" && validObjectives.length > 0;
 
   return (
     <>
@@ -801,7 +1026,7 @@ export default function ChatPage() {
           justifyContent: "space-between", padding: "10px 18px",
           borderBottom: "1px solid var(--border)", background: "var(--bg-surface)",
         }}>
-          <button onClick={handleReset} style={{ display: "flex", alignItems: "center", gap: "9px", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+          <button onClick={requestReset} style={{ display: "flex", alignItems: "center", gap: "9px", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
             {phase === "reflecting" ? <ReflectionIcon size={30} /> : <CoraIcon size={30} />}
             <span style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-1)", letterSpacing: "-0.02em" }}>
               {phase === "reflecting" ? "Reflection" : "Cora"}
@@ -820,8 +1045,14 @@ export default function ChatPage() {
               </>
             )}
 
+            {phase === "reflecting" && (
+              <HeaderBtn onClick={() => { setPhase("chatting"); setChatReadOnly(true); }}>
+                ← Back to chat
+              </HeaderBtn>
+            )}
+
             {inSession && (
-              <HeaderBtn onClick={handleReset}>New session</HeaderBtn>
+              <HeaderBtn onClick={requestReset}>New session</HeaderBtn>
             )}
 
             <button
@@ -841,228 +1072,462 @@ export default function ChatPage() {
           </div>
         </header>
 
-        {/* ── Setup ── */}
-        {phase === "setup" && (
-          <div style={{ flex: 1, overflowY: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: "40px 24px" }}>
-            <div className="fade-up" style={{ width: "100%", maxWidth: "480px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "32px" }}>
-                <CoraIcon size={40} />
-                <div>
-                  <h1 style={{ fontSize: "20px", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text-1)", lineHeight: 1.2 }}>Hi, I'm Cora</h1>
-                  <p style={{ fontSize: "13.5px", color: "var(--text-2)", marginTop: "2px" }}>An AI student for education research</p>
-                </div>
-              </div>
+        {/* ── Body: sidebar + content ── */}
+        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginBottom: "20px" }}>
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-2)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Topic</label>
-                  <input
-                    ref={topicRef}
-                    autoFocus
-                    value={topic}
-                    onChange={(e) => setTopic(e.target.value)}
-                    onKeyDown={handleSetupKey}
-                    placeholder="e.g. Fractions, Photosynthesis, World War II…"
+          {/* ── LO Sidebar (≥ 900px, chatting phase only) ── */}
+          {showSidebar && (
+            <aside style={{
+              width: "224px", flexShrink: 0,
+              borderRight: "1px solid var(--border)",
+              background: "var(--bg-surface)",
+              overflowY: "auto",
+              padding: "20px 16px",
+            }}>
+              <LOChecklist objectives={validObjectives} loStatus={loStatus} />
+            </aside>
+          )}
+
+          {/* ── Main content column ── */}
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+            {/* ── Setup ── */}
+            {phase === "setup" && (
+              <div style={{ flex: 1, overflowY: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: "40px 24px" }}>
+                <div className="fade-up" style={{ width: "100%", maxWidth: "480px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "32px" }}>
+                    <CoraIcon size={40} />
+                    <div>
+                      <h1 style={{ fontSize: "20px", fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text-1)", lineHeight: 1.2 }}>Hi, I'm Cora</h1>
+                      <p style={{ fontSize: "13.5px", color: "var(--text-2)", marginTop: "2px" }}>An AI student for education research</p>
+                    </div>
+                  </div>
+
+                  {/* Demo topic selector */}
+                  {demoMode && (
+                    <div style={{ marginBottom: "18px" }}>
+                      <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-2)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Demo Topic</label>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        {Object.keys(DEMO_SCENARIOS).map((key) => (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => handleSelectDemoTopic(key)}
+                            style={{
+                              padding: "7px 14px", borderRadius: "8px",
+                              border: `1.5px solid ${demoKey === key ? "var(--accent)" : "var(--border)"}`,
+                              background: demoKey === key ? "var(--accent-dim)" : "var(--bg-surface)",
+                              color: demoKey === key ? "var(--accent)" : "var(--text-2)",
+                              fontSize: "13px", fontWeight: demoKey === key ? 600 : 400,
+                              cursor: "pointer", transition: "all 0.12s",
+                            }}
+                            onMouseEnter={(e) => { if (demoKey !== key) { const el = e.currentTarget; el.style.borderColor = "var(--accent)"; el.style.color = "var(--accent)"; } }}
+                            onMouseLeave={(e) => { if (demoKey !== key) { const el = e.currentTarget; el.style.borderColor = "var(--border)"; el.style.color = "var(--text-2)"; } }}
+                          >
+                            {key}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginBottom: "20px" }}>
+                    <div>
+                      <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-2)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Topic</label>
+                      <input
+                        ref={topicRef}
+                        autoFocus
+                        value={topic}
+                        onChange={(e) => setTopic(e.target.value)}
+                        onKeyDown={handleSetupKey}
+                        placeholder="e.g. Fractions, Photosynthesis, World War II…"
+                        style={{
+                          width: "100%", padding: "11px 14px", borderRadius: "10px",
+                          border: "1.5px solid var(--border)", background: "var(--bg-surface)",
+                          color: "var(--text-1)", fontSize: "14.5px", outline: "none",
+                          transition: "border-color 0.15s", fontFamily: "inherit",
+                        }}
+                        onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                        onBlur={(e)  => (e.currentTarget.style.borderColor = "var(--border)")}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-2)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Learning Objectives</label>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {objectives.map((obj, i) => (
+                          <div key={i} style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                            <input
+                              value={obj}
+                              onChange={(e) => {
+                                const next = [...objectives];
+                                next[i] = e.target.value;
+                                setObjectives(next);
+                              }}
+                              onKeyDown={handleSetupKey}
+                              placeholder="Students will be able to…"
+                              style={{
+                                flex: 1, padding: "11px 14px", borderRadius: "10px",
+                                border: "1.5px solid var(--border)", background: "var(--bg-surface)",
+                                color: "var(--text-1)", fontSize: "14.5px", outline: "none",
+                                transition: "border-color 0.15s", fontFamily: "inherit",
+                              }}
+                              onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                              onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
+                            />
+                            {objectives.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => setObjectives(objectives.filter((_, j) => j !== i))}
+                                style={{
+                                  flexShrink: 0, width: "32px", height: "32px",
+                                  borderRadius: "8px", border: "1px solid var(--border)",
+                                  background: "transparent", color: "var(--text-3)",
+                                  fontSize: "18px", lineHeight: 1, cursor: "pointer",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                }}
+                                onMouseEnter={(e) => { const el = e.currentTarget; el.style.background = "var(--bg-hover)"; el.style.color = "var(--text-1)"; }}
+                                onMouseLeave={(e) => { const el = e.currentTarget; el.style.background = "transparent"; el.style.color = "var(--text-3)"; }}
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setObjectives([...objectives, ""])}
+                          style={{
+                            padding: "8px 14px", borderRadius: "9px",
+                            border: "1.5px dashed var(--border)", background: "transparent",
+                            color: "var(--text-3)", fontSize: "13px", fontWeight: 500,
+                            cursor: "pointer", transition: "all 0.12s", textAlign: "left",
+                          }}
+                          onMouseEnter={(e) => { const el = e.currentTarget; el.style.borderColor = "var(--accent)"; el.style.color = "var(--accent)"; }}
+                          onMouseLeave={(e) => { const el = e.currentTarget; el.style.borderColor = "var(--border)"; el.style.color = "var(--text-3)"; }}
+                        >
+                          + Add learning objective
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={openConfirmModal}
+                    disabled={!isReady}
                     style={{
-                      width: "100%", padding: "11px 14px", borderRadius: "10px",
-                      border: "1.5px solid var(--border)", background: "var(--bg-surface)",
-                      color: "var(--text-1)", fontSize: "14.5px", outline: "none",
-                      transition: "border-color 0.15s", fontFamily: "inherit",
+                      width: "100%", padding: "12px", borderRadius: "10px", border: "none",
+                      background: isReady ? "linear-gradient(135deg, #3b5bdb 0%, #5b7cf0 100%)" : "var(--border)",
+                      color: isReady ? "#fff" : "var(--text-3)",
+                      fontSize: "14.5px", fontWeight: 600,
+                      cursor: isReady ? "pointer" : "default",
+                      transition: "all 0.15s",
+                      boxShadow: isReady ? "0 2px 12px rgba(59,91,219,0.3)" : "none",
                     }}
-                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
-                    onBlur={(e)  => (e.currentTarget.style.borderColor = "var(--border)")}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-2)", marginBottom: "6px", textTransform: "uppercase", letterSpacing: "0.05em" }}>Learning objective</label>
-                  <textarea
-                    value={objective}
-                    onChange={(e) => setObjective(e.target.value)}
-                    onKeyDown={handleSetupKey}
-                    placeholder="Students will be able to…"
-                    rows={3}
-                    style={{
-                      width: "100%", padding: "11px 14px", borderRadius: "10px",
-                      border: "1.5px solid var(--border)", background: "var(--bg-surface)",
-                      color: "var(--text-1)", fontSize: "14.5px", outline: "none", resize: "none",
-                      lineHeight: 1.55, transition: "border-color 0.15s", fontFamily: "inherit",
-                    }}
-                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
-                    onBlur={(e)  => (e.currentTarget.style.borderColor = "var(--border)")}
-                  />
-                </div>
-              </div>
+                    onMouseEnter={(e) => { if (isReady) (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 20px rgba(59,91,219,0.4)"; }}
+                    onMouseLeave={(e) => { if (isReady) (e.currentTarget as HTMLElement).style.boxShadow = "0 2px 12px rgba(59,91,219,0.3)"; }}
+                  >
+                    Review prompt & start →
+                  </button>
 
-              <button
-                onClick={openConfirmModal}
-                disabled={!isReady}
-                style={{
-                  width: "100%", padding: "12px", borderRadius: "10px", border: "none",
-                  background: isReady ? "linear-gradient(135deg, #3b5bdb 0%, #5b7cf0 100%)" : "var(--border)",
-                  color: isReady ? "#fff" : "var(--text-3)",
-                  fontSize: "14.5px", fontWeight: 600,
-                  cursor: isReady ? "pointer" : "default",
-                  transition: "all 0.15s",
-                  boxShadow: isReady ? "0 2px 12px rgba(59,91,219,0.3)" : "none",
-                }}
-                onMouseEnter={(e) => { if (isReady) (e.currentTarget as HTMLElement).style.boxShadow = "0 4px 20px rgba(59,91,219,0.4)"; }}
-                onMouseLeave={(e) => { if (isReady) (e.currentTarget as HTMLElement).style.boxShadow = "0 2px 12px rgba(59,91,219,0.3)"; }}
-              >
-                Review prompt & start →
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ── Cora chat ── */}
-        {phase === "chatting" && (
-          <>
-            <main style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
-              <div style={{ maxWidth: "680px", margin: "0 auto", paddingTop: "28px", paddingBottom: "16px", display: "flex", flexDirection: "column", gap: "20px" }}>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                  <div style={{
-                    display: "inline-flex", alignItems: "center", gap: "6px",
-                    padding: "4px 13px", borderRadius: "99px",
-                    border: "1px solid var(--border)", background: "var(--bg-surface)",
-                    fontSize: "12px", color: "var(--text-3)",
-                  }}>
-                    <span style={{ fontWeight: 600, color: "var(--accent)" }}>{topic}</span>
-                    <span>·</span>
-                    <span>{currentModel.label} {currentModel.sublabel}</span>
+                  {/* Demo button / indicator */}
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "12px" }}>
+                    {demoMode ? (
+                      <span style={{ fontSize: "11px", color: "var(--accent)", fontWeight: 600, letterSpacing: "0.03em" }}>
+                        ● Demo on
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowDemoPasswordModal(true)}
+                        style={{
+                          fontSize: "11px", color: "var(--text-3)", background: "none",
+                          border: "none", cursor: "pointer", padding: 0,
+                          transition: "color 0.12s",
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "var(--text-2)"; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "var(--text-3)"; }}
+                      >
+                        Demo
+                      </button>
+                    )}
                   </div>
                 </div>
+              </div>
+            )}
 
-                {coraMessages.map((m, i) => (
-                  <div key={i} className="msg-in">
-                    <MessageBubble m={m} label="Cora" />
+            {/* ── Cora chat ── */}
+            {phase === "chatting" && (
+              <>
+                <main style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
+                  <div style={{ maxWidth: "680px", margin: "0 auto", paddingTop: "28px", paddingBottom: "16px", display: "flex", flexDirection: "column", gap: "20px" }}>
+                    <div style={{ display: "flex", justifyContent: "center" }}>
+                      <div style={{
+                        display: "inline-flex", alignItems: "center", gap: "6px",
+                        padding: "4px 13px", borderRadius: "99px",
+                        border: "1px solid var(--border)", background: "var(--bg-surface)",
+                        fontSize: "12px", color: "var(--text-3)",
+                      }}>
+                        <span style={{ fontWeight: 600, color: "var(--accent)" }}>{topic}</span>
+                        <span>·</span>
+                        <span>{currentModel.label} {currentModel.sublabel}</span>
+                      </div>
+                    </div>
+
+                    {/* Inline LO checklist — narrow viewport fallback only */}
+                    {showInlineChecklist && (
+                      <div style={{
+                        background: "var(--bg-surface)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "12px",
+                        padding: "12px 16px",
+                      }}>
+                        <LOChecklist objectives={validObjectives} loStatus={loStatus} />
+                      </div>
+                    )}
+
+                    {coraMessages.map((m, i) => (
+                      <div key={i} className="msg-in">
+                        <MessageBubble m={m} label="Cora" />
+                      </div>
+                    ))}
+
+                    {coraLoading && (
+                      <div className="msg-in" style={{ display: "flex", gap: "10px", alignItems: "flex-end" }}>
+                        <div style={{ flexShrink: 0, marginBottom: "2px" }}><CoraIcon size={28} /></div>
+                        <div style={{
+                          padding: "13px 16px", borderRadius: "18px 18px 18px 4px",
+                          background: "var(--bot-bubble)", border: "1px solid var(--border)",
+                          boxShadow: "var(--card-shadow)",
+                        }}>
+                          <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "7px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Cora</p>
+                          <TypingDots />
+                        </div>
+                      </div>
+                    )}
+
+                    {error && (
+                      <div style={{ textAlign: "center", fontSize: "13px", color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "10px", padding: "10px 16px" }}>
+                        {error}
+                      </div>
+                    )}
+
+                    {coraSessionDone && !coraLoading && (
+                      <div className="fade-up" style={{
+                        background: "var(--accent-dim)", border: "1.5px solid var(--accent)",
+                        borderRadius: "14px", padding: "18px 20px", textAlign: "center",
+                      }}>
+                        <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-1)", marginBottom: "6px" }}>
+                          Session complete 🎉
+                        </p>
+                        <p style={{ fontSize: "13px", color: "var(--text-2)", marginBottom: "14px" }}>
+                          Ready to reflect on your teaching?
+                        </p>
+                        <button
+                          onClick={goToReflection}
+                          style={{
+                            padding: "9px 22px", borderRadius: "9px", border: "none",
+                            background: "linear-gradient(135deg, #3b5bdb 0%, #5b7cf0 100%)",
+                            color: "#fff", fontSize: "13.5px", fontWeight: 600,
+                            cursor: "pointer", boxShadow: "0 2px 10px rgba(59,91,219,0.35)",
+                          }}
+                        >
+                          Continue to Reflection →
+                        </button>
+                      </div>
+                    )}
+
+                    <div ref={bottomRef} />
                   </div>
-                ))}
+                </main>
 
-                {coraLoading && (
-                  <div className="msg-in" style={{ display: "flex", gap: "10px", alignItems: "flex-end" }}>
-                    <div style={{ flexShrink: 0, marginBottom: "2px" }}><CoraIcon size={28} /></div>
-                    <div style={{
-                      padding: "13px 16px", borderRadius: "18px 18px 18px 4px",
-                      background: "var(--bot-bubble)", border: "1px solid var(--border)",
-                      boxShadow: "var(--card-shadow)",
-                    }}>
-                      <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "7px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Cora</p>
-                      <TypingDots />
+                {/* Next message button — demo mode only, not shown in read-only view */}
+                {demoMode && !coraLoading && !chatReadOnly && (
+                  <div style={{ flexShrink: 0, padding: "8px 18px 0", background: "var(--bg)" }}>
+                    <div style={{ maxWidth: "680px", margin: "0 auto" }}>
+                      <button
+                        type="button"
+                        onClick={() => fetchDemoLine(coraMessages, "chatting", setCoraInput)}
+                        disabled={demoNextLoading}
+                        style={{
+                          padding: "7px 15px", borderRadius: "8px",
+                          border: "1px solid var(--border)", background: "var(--bg-surface)",
+                          color: demoNextLoading ? "var(--text-3)" : "var(--text-2)",
+                          fontSize: "12.5px", fontWeight: 500,
+                          cursor: demoNextLoading ? "default" : "pointer",
+                          transition: "all 0.12s",
+                        }}
+                        onMouseEnter={(e) => { if (!demoNextLoading) { const el = e.currentTarget; el.style.background = "var(--bg-hover)"; el.style.color = "var(--text-1)"; } }}
+                        onMouseLeave={(e) => { const el = e.currentTarget; el.style.background = "var(--bg-surface)"; el.style.color = demoNextLoading ? "var(--text-3)" : "var(--text-2)"; }}
+                      >
+                        {demoNextLoading ? "Generating…" : "Next message →"}
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {error && (
-                  <div style={{ textAlign: "center", fontSize: "13px", color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "10px", padding: "10px 16px" }}>
-                    {error}
+                <ChatInput
+                  input={coraInput} setInput={setCoraInput}
+                  onSend={sendCoraMessage}
+                  loading={coraLoading || chatReadOnly}
+                  placeholder={chatReadOnly ? "Chat is read-only — return to reflection above" : `Teach Cora about ${topic}…`}
+                  model={model} onModelChange={setModel} showModelPicker={!chatReadOnly}
+                />
+              </>
+            )}
+
+            {/* ── Reflection ── */}
+            {phase === "reflecting" && (
+              <>
+                <main style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
+                  <div style={{ maxWidth: "680px", margin: "0 auto", paddingTop: "28px", paddingBottom: "16px", display: "flex", flexDirection: "column", gap: "20px" }}>
+                    <div style={{ display: "flex", justifyContent: "center" }}>
+                      <div style={{
+                        display: "inline-flex", alignItems: "center", gap: "6px",
+                        padding: "4px 13px", borderRadius: "99px",
+                        border: "1px solid var(--border)", background: "var(--bg-surface)",
+                        fontSize: "12px", color: "var(--text-3)",
+                      }}>
+                        <span style={{ fontWeight: 600, color: "var(--accent)" }}>Reflection</span>
+                        <span>·</span>
+                        <span>{topic}</span>
+                      </div>
+                    </div>
+
+                    {reflMessages.map((m, i) => (
+                      <div key={i} className="msg-in">
+                        <MessageBubble m={m} label="Reflection Coach" accentLabel />
+                      </div>
+                    ))}
+
+                    {reflLoading && (
+                      <div className="msg-in" style={{ display: "flex", gap: "10px", alignItems: "flex-end" }}>
+                        <div style={{ flexShrink: 0, marginBottom: "2px" }}><ReflectionIcon size={28} /></div>
+                        <div style={{
+                          padding: "13px 16px", borderRadius: "18px 18px 18px 4px",
+                          background: "var(--bot-bubble)", border: "1px solid var(--border)",
+                          boxShadow: "var(--card-shadow)",
+                        }}>
+                          <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "7px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Reflection Coach</p>
+                          <TypingDots />
+                        </div>
+                      </div>
+                    )}
+
+                    {error && (
+                      <div style={{ textAlign: "center", fontSize: "13px", color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "10px", padding: "10px 16px" }}>
+                        {error}
+                      </div>
+                    )}
+
+                    <div ref={bottomRef} />
                   </div>
-                )}
+                </main>
 
-                {/* Reflection prompt banner */}
-                {coraSessionDone && !coraLoading && (
-                  <div className="fade-up" style={{
-                    background: "var(--accent-dim)", border: "1.5px solid var(--accent)",
-                    borderRadius: "14px", padding: "18px 20px", textAlign: "center",
-                  }}>
-                    <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-1)", marginBottom: "6px" }}>
-                      Session complete 🎉
-                    </p>
-                    <p style={{ fontSize: "13px", color: "var(--text-2)", marginBottom: "14px" }}>
-                      Ready to reflect on your teaching experience?
-                    </p>
-                    <button
-                      onClick={startReflection}
-                      style={{
-                        padding: "9px 22px", borderRadius: "9px", border: "none",
-                        background: "linear-gradient(135deg, #3b5bdb 0%, #5b7cf0 100%)",
-                        color: "#fff", fontSize: "13.5px", fontWeight: 600,
-                        cursor: "pointer", boxShadow: "0 2px 10px rgba(59,91,219,0.35)",
-                      }}
-                    >
-                      Continue to Reflection →
-                    </button>
-                  </div>
-                )}
-
-                <div ref={bottomRef} />
-              </div>
-            </main>
-
-            <ChatInput
-              input={coraInput} setInput={setCoraInput}
-              onSend={sendCoraMessage} loading={coraLoading}
-              placeholder={`Teach Cora about ${topic}…`}
-              model={model} onModelChange={setModel} showModelPicker
-            />
-          </>
-        )}
-
-        {/* ── Reflection ── */}
-        {phase === "reflecting" && (
-          <>
-            <main style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
-              <div style={{ maxWidth: "680px", margin: "0 auto", paddingTop: "28px", paddingBottom: "16px", display: "flex", flexDirection: "column", gap: "20px" }}>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                  <div style={{
-                    display: "inline-flex", alignItems: "center", gap: "6px",
-                    padding: "4px 13px", borderRadius: "99px",
-                    border: "1px solid var(--border)", background: "var(--bg-surface)",
-                    fontSize: "12px", color: "var(--text-3)",
-                  }}>
-                    <span style={{ fontWeight: 600, color: "var(--accent)" }}>Reflection</span>
-                    <span>·</span>
-                    <span>{topic}</span>
-                  </div>
-                </div>
-
-                {reflMessages.map((m, i) => (
-                  <div key={i} className="msg-in">
-                    <MessageBubble m={m} label="Reflection Coach" accentLabel />
-                  </div>
-                ))}
-
-                {reflLoading && (
-                  <div className="msg-in" style={{ display: "flex", gap: "10px", alignItems: "flex-end" }}>
-                    <div style={{ flexShrink: 0, marginBottom: "2px" }}><ReflectionIcon size={28} /></div>
-                    <div style={{
-                      padding: "13px 16px", borderRadius: "18px 18px 18px 4px",
-                      background: "var(--bot-bubble)", border: "1px solid var(--border)",
-                      boxShadow: "var(--card-shadow)",
-                    }}>
-                      <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "7px", textTransform: "uppercase", letterSpacing: "0.06em" }}>Reflection Coach</p>
-                      <TypingDots />
+                {/* Next message button — demo mode, reflection phase */}
+                {demoMode && !reflLoading && (
+                  <div style={{ flexShrink: 0, padding: "8px 18px 0", background: "var(--bg)" }}>
+                    <div style={{ maxWidth: "680px", margin: "0 auto" }}>
+                      <button
+                        type="button"
+                        onClick={() => fetchDemoLine(reflMessages, "reflecting", setReflInput)}
+                        disabled={demoNextLoading}
+                        style={{
+                          padding: "7px 15px", borderRadius: "8px",
+                          border: "1px solid var(--border)", background: "var(--bg-surface)",
+                          color: demoNextLoading ? "var(--text-3)" : "var(--text-2)",
+                          fontSize: "12.5px", fontWeight: 500,
+                          cursor: demoNextLoading ? "default" : "pointer",
+                          transition: "all 0.12s",
+                        }}
+                        onMouseEnter={(e) => { if (!demoNextLoading) { const el = e.currentTarget; el.style.background = "var(--bg-hover)"; el.style.color = "var(--text-1)"; } }}
+                        onMouseLeave={(e) => { const el = e.currentTarget; el.style.background = "var(--bg-surface)"; el.style.color = demoNextLoading ? "var(--text-3)" : "var(--text-2)"; }}
+                      >
+                        {demoNextLoading ? "Generating…" : "Next message →"}
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {error && (
-                  <div style={{ textAlign: "center", fontSize: "13px", color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: "10px", padding: "10px 16px" }}>
-                    {error}
-                  </div>
-                )}
+                <ChatInput
+                  input={reflInput} setInput={setReflInput}
+                  onSend={sendReflMessage} loading={reflLoading}
+                  placeholder="Reflect on your teaching experience…"
+                  model={model} onModelChange={setModel} showModelPicker={false}
+                />
+              </>
+            )}
 
-                <div ref={bottomRef} />
-              </div>
-            </main>
-
-            <ChatInput
-              input={reflInput} setInput={setReflInput}
-              onSend={sendReflMessage} loading={reflLoading}
-              placeholder="Reflect on your teaching experience…"
-              model={model} onModelChange={setModel} showModelPicker={false}
-            />
-          </>
-        )}
+          </div>{/* end main content column */}
+        </div>{/* end body row */}
       </div>
 
       {/* ── Prompt modal ── */}
       {showPromptModal && (
         <PromptModal
           topic={topic}
-          objective={objective}
+          objectives={objectives}
           onClose={() => { setShowPromptModal(false); setPromptModalConfirmMode(false); }}
           onConfirm={promptModalConfirmMode ? handleConfirmAndStart : undefined}
         />
+      )}
+
+      {/* ── Demo password modal ── */}
+      {showDemoPasswordModal && (
+        <DemoPasswordModal
+          onClose={() => setShowDemoPasswordModal(false)}
+          onSuccess={() => setDemoMode(true)}
+        />
+      )}
+
+      {/* ── Exit confirm modal ── */}
+      {showExitConfirm && (
+        <div
+          onClick={() => setShowExitConfirm(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 500,
+            background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            className="pop-in"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--pop-bg)", border: "1px solid var(--border)",
+              borderRadius: "14px", boxShadow: "var(--pop-shadow)",
+              padding: "24px 26px", width: "320px",
+            }}
+          >
+            <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-1)", marginBottom: "8px" }}>
+              Exit session?
+            </p>
+            <p style={{ fontSize: "13px", color: "var(--text-2)", marginBottom: "20px", lineHeight: 1.5 }}>
+              Are you sure you want to exit? Your session will be lost.
+            </p>
+            <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setShowExitConfirm(false)}
+                style={{
+                  padding: "8px 18px", borderRadius: "8px",
+                  border: "1px solid var(--border)", background: "transparent",
+                  color: "var(--text-2)", fontSize: "13.5px", fontWeight: 500, cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowExitConfirm(false); handleReset(); }}
+                style={{
+                  padding: "8px 18px", borderRadius: "8px", border: "none",
+                  background: "#dc2626", color: "#fff", fontSize: "13.5px",
+                  fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                Exit
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

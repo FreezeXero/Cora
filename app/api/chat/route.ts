@@ -28,11 +28,18 @@ export async function POST(request: NextRequest) {
         return Response.json({ error: "ANTHROPIC_API_KEY not set" }, { status: 500 });
       }
       const client = new Anthropic({ apiKey });
+      const claudeMessages = normalizedMessages.map((m) => ({ role: m.role, content: m.content }));
+      // Claude API requires first message to be from user. If history starts with
+      // Cora's opening (assistant turn), anchor it with the synthetic kickoff turn.
+      const anchoredClaudeMessages =
+        claudeMessages[0]?.role === "assistant"
+          ? [{ role: "user" as const, content: "Please introduce yourself and begin." }, ...claudeMessages]
+          : claudeMessages;
       const response = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 1024,
         system: systemPrompt,
-        messages: normalizedMessages.map((m) => ({ role: m.role, content: m.content })),
+        messages: anchoredClaudeMessages,
       });
       const content =
         response.content[0]?.type === "text" ? response.content[0].text : "";
@@ -50,10 +57,16 @@ export async function POST(request: NextRequest) {
         systemInstruction: systemPrompt,
       });
 
-      // Gemini requires history to start with a user message — drop any leading assistant turns.
+      // Gemini requires history to start with a user message. If history begins
+      // with Cora's opening (assistant turn), prepend the synthetic kickoff user
+      // turn so Gemini knows the greeting already happened and won't repeat it.
       const historyRaw = normalizedMessages.slice(0, -1);
-      const firstUserIdx = historyRaw.findIndex((m) => m.role === "user");
-      const history = (firstUserIdx === -1 ? [] : historyRaw.slice(firstUserIdx)).map((m) => ({
+      const anchoredRaw =
+        historyRaw.length > 0 && historyRaw[0].role === "assistant"
+          ? [{ role: "user" as const, content: "Please introduce yourself and begin." }, ...historyRaw]
+          : historyRaw;
+      const firstUserIdx = anchoredRaw.findIndex((m) => m.role === "user");
+      const history = (firstUserIdx === -1 ? [] : anchoredRaw.slice(firstUserIdx)).map((m) => ({
         role: m.role === "assistant" ? "model" : "user",
         parts: [{ text: m.content }],
       }));
