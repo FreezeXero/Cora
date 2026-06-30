@@ -89,7 +89,7 @@ STOPPING CONDITION
 Only stop once you believe all learning objectives have been clearly met and you've asked at least one deeper question. When stopping, summarize what you learned in 2-3 sentences and say "I think I've got it, thanks for teaching me!"
 
 REFLECTION
-After your summary, ask the person to reflect on what part was hardest to explain.
+After your summary, ask the person: "What did explaining this to me reveal about your own understanding of the topic?"
 
 WRONG ANSWERS
 If something sounds incorrect, say you're confused and ask them to explain it a different way. Never say they are wrong directly.
@@ -676,7 +676,7 @@ function MessageBubble({ m, label, accentLabel }: { m: Message; label: string; a
 
 // ── LO checklist (shared between sidebar and inline fallback) ─────────────────
 
-function LOChecklist({ objectives, loStatus }: { objectives: string[]; loStatus: boolean[] }) {
+function LOChecklist({ objectives, loStatus, goingDeeper }: { objectives: string[]; loStatus: boolean[]; goingDeeper: boolean }) {
   return (
     <>
       <p style={{ fontSize: "11px", fontWeight: 700, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "10px" }}>
@@ -691,8 +691,45 @@ function LOChecklist({ objectives, loStatus }: { objectives: string[]; loStatus:
             <span style={{ fontSize: "13px", lineHeight: 1.45, color: loStatus[i] ? "var(--text-1)" : "var(--text-2)" }}>{o}</span>
           </div>
         ))}
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "8px", marginTop: "4px", paddingTop: "10px", borderTop: "1px solid var(--border)" }}>
+          <span style={{ flexShrink: 0, marginTop: "1px", color: goingDeeper ? "var(--accent)" : "var(--text-3)" }}>
+            {goingDeeper ? <CheckMark /> : <PendingCircle />}
+          </span>
+          <span style={{ fontSize: "13px", lineHeight: 1.45, color: goingDeeper ? "var(--text-1)" : "var(--text-2)", fontStyle: "italic" }}>Going Deeper</span>
+        </div>
       </div>
     </>
+  );
+}
+
+function LOInlineBubbles({ objectives, loStatus }: { objectives: string[]; loStatus: boolean[] }) {
+  if (objectives.length === 0) return null;
+  return (
+    <div style={{ display: "flex", gap: "6px", marginTop: "6px", marginLeft: "38px", flexWrap: "wrap" }}>
+      {objectives.map((obj, i) => {
+        const met = !!loStatus[i];
+        return (
+          <span
+            key={i}
+            title={obj}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: "3px",
+              padding: "2px 6px", borderRadius: "99px",
+              background: met ? "var(--accent-dim)" : "var(--bg-surface)",
+              border: `1px solid ${met ? "var(--accent)" : "var(--border)"}`,
+              color: met ? "var(--accent)" : "var(--text-3)",
+              fontSize: "10.5px", fontWeight: 600, letterSpacing: "0.02em",
+              flexShrink: 0, transition: "all 0.2s",
+            }}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center" }}>
+              {met ? <CheckMark /> : <PendingCircle />}
+            </span>
+            LO{i + 1}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -721,6 +758,9 @@ export default function ChatPage() {
 
   // LO evaluation status
   const [loStatus, setLoStatus] = useState<boolean[]>([]);
+  const [goingDeeper, setGoingDeeper] = useState(false);
+  // Per-turn snapshots: loStatusSnapshots[k] = loStatus after the k-th evaluation call
+  const [loStatusSnapshots, setLoStatusSnapshots] = useState<boolean[][]>([]);
 
   // Sidebar visibility: true when viewport >= 900px
   const [sidebarVisible, setSidebarVisible] = useState(false);
@@ -841,6 +881,8 @@ export default function ChatPage() {
     setCoraReflectionAsked(false);
     setChatReadOnly(false);
     setLoStatus([]);
+    setGoingDeeper(false);
+    setLoStatusSnapshots([]);
     setError(null);
 
     setCoraLoading(true);
@@ -874,6 +916,8 @@ export default function ChatPage() {
     setCoraReflectionAsked(false);
     setChatReadOnly(false);
     setLoStatus([]);
+    setGoingDeeper(false);
+    setLoStatusSnapshots([]);
     setError(null);
     setTimeout(() => topicRef.current?.focus(), 60);
   }
@@ -925,7 +969,15 @@ export default function ChatPage() {
           body: JSON.stringify({ objectives: validObjectives, messages: updatedMessages }),
         })
           .then((r) => r.json())
-          .then((data) => { if (Array.isArray(data.results)) setLoStatus(data.results); })
+          .then((data) => {
+            if (Array.isArray(data.results)) {
+              const loResults = data.results.slice(0, validObjectives.length) as boolean[];
+              const deeper = data.results[validObjectives.length] as boolean ?? false;
+              setLoStatus(loResults);
+              setGoingDeeper(deeper);
+              setLoStatusSnapshots((prev) => [...prev, loResults]);
+            }
+          })
           .catch(() => {});
       }
     } catch (err) {
@@ -1084,7 +1136,7 @@ export default function ChatPage() {
               overflowY: "auto",
               padding: "20px 16px",
             }}>
-              <LOChecklist objectives={validObjectives} loStatus={loStatus} />
+              <LOChecklist objectives={validObjectives} loStatus={loStatus} goingDeeper={goingDeeper} />
             </aside>
           )}
 
@@ -1281,15 +1333,27 @@ export default function ChatPage() {
                         borderRadius: "12px",
                         padding: "12px 16px",
                       }}>
-                        <LOChecklist objectives={validObjectives} loStatus={loStatus} />
+                        <LOChecklist objectives={validObjectives} loStatus={loStatus} goingDeeper={goingDeeper} />
                       </div>
                     )}
 
-                    {coraMessages.map((m, i) => (
-                      <div key={i} className="msg-in">
-                        <MessageBubble m={m} label="Cora" />
-                      </div>
-                    ))}
+                    {coraMessages.map((m, i) => {
+                      // Count assistant messages before this index to find the right snapshot
+                      const assistantsBefore = coraMessages.slice(0, i).filter((msg) => msg.role === "assistant").length;
+                      // Greeting (first assistant msg, assistantsBefore=0) has no eval snapshot yet
+                      // k-th subsequent assistant msg (assistantsBefore=k) uses snapshot[k-1]
+                      const snapshot = m.role === "assistant" && assistantsBefore > 0
+                        ? (loStatusSnapshots[assistantsBefore - 1] ?? loStatus)
+                        : [];
+                      return (
+                        <div key={i} className="msg-in">
+                          <MessageBubble m={m} label="Cora" />
+                          {m.role === "assistant" && validObjectives.length > 0 && assistantsBefore > 0 && (
+                            <LOInlineBubbles objectives={validObjectives} loStatus={snapshot} />
+                          )}
+                        </div>
+                      );
+                    })}
 
                     {coraLoading && (
                       <div className="msg-in" style={{ display: "flex", gap: "10px", alignItems: "flex-end" }}>
