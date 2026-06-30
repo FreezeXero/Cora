@@ -9,7 +9,7 @@ type ModelKey = "claude" | "gemini";
 type Phase = "setup" | "confirming" | "chatting" | "reflecting";
 
 const MODELS: { key: ModelKey; label: string; sublabel: string }[] = [
-  { key: "claude", label: "Claude", sublabel: "Sonnet 4.6" },
+  { key: "claude", label: "Claude", sublabel: "Haiku 4.5" },
   { key: "gemini", label: "Gemini", sublabel: "2.5 Flash" },
 ];
 

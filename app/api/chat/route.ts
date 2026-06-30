@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
           ? [{ role: "user" as const, content: "Please introduce yourself and begin." }, ...claudeMessages]
           : claudeMessages;
       const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
         system: systemPrompt,
         messages: anchoredClaudeMessages,
