@@ -71,9 +71,16 @@ export async function POST(request: NextRequest) {
         parts: [{ text: m.content }],
       }));
 
+      const lastEntry = normalizedMessages[normalizedMessages.length - 1];
+      if (lastEntry.role !== "user") {
+        return Response.json(
+          { error: "Expected the last message to be from the teacher" },
+          { status: 400 }
+        );
+      }
+
       const chat = geminiModel.startChat({ history });
-      const lastMessage = normalizedMessages[normalizedMessages.length - 1].content;
-      const result = await chat.sendMessage(lastMessage);
+      const result = await chat.sendMessage(lastEntry.content);
       const content = result.response.text();
       return Response.json({ content });
     }

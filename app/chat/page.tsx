@@ -47,6 +47,34 @@ const DEMO_SCENARIOS: Record<string, DemoScenario> = {
       "Explain why starting early matters",
     ],
   },
+  "Integer Operations": {
+    topic: "Integer Operations",
+    objectives: [
+      "Add and subtract positive and negative integers using the rules for integer operations",
+      "Multiply and divide positive and negative integers accurately",
+    ],
+  },
+  "Order of Operations": {
+    topic: "Order of Operations",
+    objectives: [
+      "Evaluate numerical expressions by applying the correct order of operations (PEMDAS)",
+      "Explain why order of operations matters and what happens if you ignore it",
+    ],
+  },
+  "Simplifying Expressions": {
+    topic: "Simplifying Expressions",
+    objectives: [
+      "Identify like terms in an algebraic expression",
+      "Simplify algebraic expressions by combining like terms",
+    ],
+  },
+  "Computing Slope": {
+    topic: "Computing Slope",
+    objectives: [
+      "Calculate the slope of a line using two points",
+      "Interpret what the slope means in context",
+    ],
+  },
 };
 
 const DEMO_PASSWORD = "4321";
@@ -93,6 +121,9 @@ After your summary, ask the person to reflect on what part was hardest to explai
 
 WRONG ANSWERS
 If something sounds incorrect, say you're confused and ask them to explain it a different way. Never say they are wrong directly.
+
+LOOP PREVENTION
+If the student has given 2 or more responses in a row that are clearly nonsense, single words, or completely unrelated to the topic, do not keep asking them to re-explain the same thing. First give them a small hint to help them get unstuck. If they still are not making progress after the hint, offer one of these two suggestions, alternating naturally between them rather than always giving the same one: "It might be a good idea to call your teacher over for some extra help!" or "You could also try asking ChatGPT or another AI to explain this concept differently, then come back and explain it to me in your own words." Then wait for them to come back before continuing.
 
 STYLE
 Never use em dashes in any response. Use commas, periods, or just start a new sentence instead.
@@ -515,6 +546,7 @@ function DemoPasswordModal({ onClose, onSuccess }: { onClose: () => void; onSucc
             onChange={(e) => setPw(e.target.value)}
             placeholder="Password"
             autoFocus
+            autoComplete="off"
             style={{
               flex: 1, padding: "9px 12px", borderRadius: "8px",
               border: "1.5px solid var(--border)", background: "var(--bg-surface)",
@@ -641,35 +673,66 @@ function ChatInput({
   );
 }
 
-function MessageBubble({ m, label, accentLabel }: { m: Message; label: string; accentLabel?: boolean }) {
+function MessageBubble({
+  m, label, accentLabel, objectives, loStatus,
+}: {
+  m: Message;
+  label: string;
+  accentLabel?: boolean;
+  objectives?: string[];
+  loStatus?: boolean[];
+}) {
   return (
-    <div style={{
-      display: "flex", gap: "10px",
-      flexDirection: m.role === "user" ? "row-reverse" : "row",
-      alignItems: "flex-end",
-    }}>
-      {m.role === "assistant" && (
-        <div style={{ flexShrink: 0, marginBottom: "2px" }}>
-          {accentLabel ? <ReflectionIcon size={28} /> : <CoraIcon size={28} />}
-        </div>
-      )}
+    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
       <div style={{
-        maxWidth: "72%", padding: "11px 15px",
-        borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-        background: m.role === "user" ? "var(--user-bubble)" : "var(--bot-bubble)",
-        color: m.role === "user" ? "var(--user-text)" : "var(--bot-text)",
-        fontSize: "14.5px", lineHeight: 1.6,
-        whiteSpace: "pre-wrap", wordBreak: "break-word",
-        boxShadow: m.role === "assistant" ? "var(--card-shadow)" : "none",
-        border: m.role === "assistant" ? "1px solid var(--border)" : "none",
+        display: "flex", gap: "10px",
+        flexDirection: m.role === "user" ? "row-reverse" : "row",
+        alignItems: "flex-end",
       }}>
         {m.role === "assistant" && (
-          <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "5px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            {label}
-          </p>
+          <div style={{ flexShrink: 0, marginBottom: "2px" }}>
+            {accentLabel ? <ReflectionIcon size={28} /> : <CoraIcon size={28} />}
+          </div>
         )}
-        {m.content}
+        <div style={{
+          maxWidth: "72%", padding: "11px 15px",
+          borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+          background: m.role === "user" ? "var(--user-bubble)" : "var(--bot-bubble)",
+          color: m.role === "user" ? "var(--user-text)" : "var(--bot-text)",
+          fontSize: "14.5px", lineHeight: 1.6,
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+          boxShadow: m.role === "assistant" ? "var(--card-shadow)" : "none",
+          border: m.role === "assistant" ? "1px solid var(--border)" : "none",
+        }}>
+          {m.role === "assistant" && (
+            <p style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--accent)", marginBottom: "5px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {label}
+            </p>
+          )}
+          {m.content}
+        </div>
       </div>
+      {m.role === "assistant" && objectives && objectives.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginLeft: "38px" }}>
+          {objectives.map((o, i) => (
+            <span
+              key={i}
+              title={o}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: "4px",
+                padding: "2px 9px", borderRadius: "99px",
+                fontSize: "11px", fontWeight: 600,
+                border: `1px solid ${loStatus?.[i] ? "var(--accent)" : "var(--border)"}`,
+                background: loStatus?.[i] ? "var(--accent-dim)" : "var(--bg-surface)",
+                color: loStatus?.[i] ? "var(--accent)" : "var(--text-3)",
+              }}
+            >
+              {loStatus?.[i] ? <CheckMark /> : <PendingCircle />}
+              LO {i + 1}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -738,6 +801,8 @@ export default function ChatPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const topicRef  = useRef<HTMLInputElement>(null);
+  const coraSendingRef = useRef(false);
+  const reflSendingRef = useRef(false);
 
   const isReady = topic.trim().length > 0 && objectives.some((o) => o.trim().length > 0);
   const currentModel = MODELS.find((m) => m.key === model)!;
@@ -893,7 +958,8 @@ export default function ChatPage() {
 
   async function sendCoraMessage() {
     const text = coraInput.trim();
-    if (!text || coraLoading) return;
+    if (!text || coraLoading || coraSendingRef.current) return;
+    coraSendingRef.current = true;
 
     const next: Message[] = [...coraMessages, { role: "user", content: text }];
     setCoraMessages(next);
@@ -932,6 +998,7 @@ export default function ChatPage() {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setCoraLoading(false);
+      coraSendingRef.current = false;
     }
   }
 
@@ -967,7 +1034,8 @@ export default function ChatPage() {
 
   async function sendReflMessage() {
     const text = reflInput.trim();
-    if (!text || reflLoading) return;
+    if (!text || reflLoading || reflSendingRef.current) return;
+    reflSendingRef.current = true;
 
     const next: Message[] = [...reflMessages, { role: "user", content: text }];
     setReflMessages(next);
@@ -992,6 +1060,7 @@ export default function ChatPage() {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setReflLoading(false);
+      reflSendingRef.current = false;
     }
   }
 
@@ -1232,9 +1301,16 @@ export default function ChatPage() {
                   {/* Demo button / indicator */}
                   <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "12px" }}>
                     {demoMode ? (
-                      <span style={{ fontSize: "11px", color: "var(--accent)", fontWeight: 600, letterSpacing: "0.03em" }}>
+                      <button
+                        type="button"
+                        onClick={() => { setDemoMode(false); setDemoKey(null); }}
+                        style={{
+                          fontSize: "11px", color: "var(--accent)", fontWeight: 600, letterSpacing: "0.03em",
+                          background: "none", border: "none", cursor: "pointer", padding: 0,
+                        }}
+                      >
                         ● Demo on
-                      </span>
+                      </button>
                     ) : (
                       <button
                         type="button"
@@ -1287,7 +1363,7 @@ export default function ChatPage() {
 
                     {coraMessages.map((m, i) => (
                       <div key={i} className="msg-in">
-                        <MessageBubble m={m} label="Cora" />
+                        <MessageBubble m={m} label="Cora" objectives={validObjectives} loStatus={loStatus} />
                       </div>
                     ))}
 
