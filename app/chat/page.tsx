@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant"; content: string; loSnapshot?: boolean[] };
 type ModelKey = "claude" | "gemini";
 type Phase = "setup" | "confirming" | "chatting" | "reflecting";
 
@@ -117,7 +117,7 @@ STOPPING CONDITION
 Only stop once you believe all learning objectives have been clearly met and you've asked at least one deeper question. When stopping, summarize what you learned in 2-3 sentences and say "I think I've got it, thanks for teaching me!"
 
 REFLECTION
-After your summary, ask the person to reflect on what part was hardest to explain.
+After your summary and the "I think I've got it, thanks for teaching me!" line, ask the person ONE question: what part was hardest to explain? Then stop completely. Do not attempt to answer the question yourself, speculate about the answer, or say anything else. Wait for the teacher to respond.
 
 WRONG ANSWERS
 If something sounds incorrect, say you're confused and ask them to explain it a different way. Never say they are wrong directly.
@@ -674,13 +674,12 @@ function ChatInput({
 }
 
 function MessageBubble({
-  m, label, accentLabel, objectives, loStatus,
+  m, label, accentLabel, objectives,
 }: {
   m: Message;
   label: string;
   accentLabel?: boolean;
   objectives?: string[];
-  loStatus?: boolean[];
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -712,7 +711,7 @@ function MessageBubble({
           {m.content}
         </div>
       </div>
-      {m.role === "assistant" && objectives && objectives.length > 0 && (
+      {m.role === "assistant" && objectives && objectives.length > 0 && m.loSnapshot !== undefined && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginLeft: "38px" }}>
           {objectives.map((o, i) => (
             <span
@@ -722,12 +721,12 @@ function MessageBubble({
                 display: "inline-flex", alignItems: "center", gap: "4px",
                 padding: "2px 9px", borderRadius: "99px",
                 fontSize: "11px", fontWeight: 600,
-                border: `1px solid ${loStatus?.[i] ? "var(--accent)" : "var(--border)"}`,
-                background: loStatus?.[i] ? "var(--accent-dim)" : "var(--bg-surface)",
-                color: loStatus?.[i] ? "var(--accent)" : "var(--text-3)",
+                border: `1px solid ${m.loSnapshot?.[i] ? "var(--accent)" : "var(--border)"}`,
+                background: m.loSnapshot?.[i] ? "var(--accent-dim)" : "var(--bg-surface)",
+                color: m.loSnapshot?.[i] ? "var(--accent)" : "var(--text-3)",
               }}
             >
-              {loStatus?.[i] ? <CheckMark /> : <PendingCircle />}
+              {m.loSnapshot?.[i] ? <CheckMark /> : <PendingCircle />}
               LO {i + 1}
             </span>
           ))}
@@ -980,18 +979,36 @@ export default function ChatPage() {
       });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error ?? `Request failed (${res.status})`);
-      const updatedMessages: Message[] = [...next, { role: "assistant", content: d.content }];
+      const newMsg: Message = { role: "assistant", content: d.content, loSnapshot: validObjectives.map(() => false) };
+      const updatedMessages: Message[] = [...next, newMsg];
       setCoraMessages(updatedMessages);
 
-      // Background LO eval — non-blocking
-      if (validObjectives.length > 0) {
+      // Background LO eval — non-blocking; skip if no real student messages yet
+      const hasRealUserMessage = updatedMessages.some(
+        (m) => m.role === "user" && !INIT_SENTINELS.has(m.content)
+      );
+      if (validObjectives.length > 0 && hasRealUserMessage) {
         fetch("/api/evaluate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ objectives: validObjectives, messages: updatedMessages }),
         })
           .then((r) => r.json())
-          .then((data) => { if (Array.isArray(data.results)) setLoStatus(data.results); })
+          .then((data) => {
+            if (Array.isArray(data.results)) {
+              // Merge: once an LO is met it stays met
+              setLoStatus((prev) => {
+                const merged = (data.results as boolean[]).map((val, i) => val || (prev[i] ?? false));
+                setCoraMessages((prevMsgs) => {
+                  const copy = [...prevMsgs];
+                  const idx = copy.map((m) => m.role).lastIndexOf("assistant");
+                  if (idx !== -1) copy[idx] = { ...copy[idx], loSnapshot: merged };
+                  return copy;
+                });
+                return merged;
+              });
+            }
+          })
           .catch(() => {});
       }
     } catch (err) {
@@ -1363,7 +1380,7 @@ export default function ChatPage() {
 
                     {coraMessages.map((m, i) => (
                       <div key={i} className="msg-in">
-                        <MessageBubble m={m} label="Cora" objectives={validObjectives} loStatus={loStatus} />
+                        <MessageBubble m={m} label="Cora" objectives={validObjectives} />
                       </div>
                     ))}
 
